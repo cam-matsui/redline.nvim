@@ -1,0 +1,21 @@
+local pr = require('redline.source.pr')
+
+describe('pr argument parsing', function()
+    it('parses plain and #-prefixed numbers', function()
+        eq({ 123 }, { pr.parse('123') })
+        eq({ 123 }, { pr.parse('#123') })
+        eq({ 123 }, { pr.parse(123) })
+    end)
+
+    it('parses full PR URLs', function()
+        eq({ 42, 'neovim', 'neovim' }, { pr.parse('https://github.com/neovim/neovim/pull/42') })
+        eq({ 7, 'o', 'r.nvim' }, { pr.parse('github.com/o/r.nvim/pull/7') })
+        eq({ 9, 'o', 'r' }, { pr.parse('https://github.com/o/r/pull/9/files') })
+    end)
+
+    it('rejects garbage', function()
+        eq(nil, pr.parse('not-a-pr'))
+        eq(nil, pr.parse('https://github.com/o/r/issues/9'))
+        eq(nil, pr.parse(nil))
+    end)
+end)

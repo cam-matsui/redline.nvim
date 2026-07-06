@@ -1,0 +1,286 @@
+*redline.txt*        Code review inside Neovim: agent diffs and GitHub PRs
+
+Author:  Cam Matsui
+License: MIT
+
+==============================================================================
+CONTENTS                                                             *redline*
+
+  1. Introduction ........................... |redline-introduction|
+  2. Setup .................................. |redline-setup|
+  3. Commands ............................... |:Review|
+  4. Mappings ............................... |redline-mappings|
+  5. Configuration .......................... |redline-config|
+  6. Export format .......................... |redline-export-format|
+  7. PR review .............................. |redline-pr|
+  8. Highlights ............................. |redline-highlights|
+
+==============================================================================
+1. INTRODUCTION                                         *redline-introduction*
+
+redline.nvim reviews code in two ways with one comment model:
+
+- Local review: `:Review` opens the working tree (or a branch) as a
+  side-by-side diff per changed file. Inline comments and suggested changes
+  export as GitHub-style markdown (|redline-export-format|) — ideal for
+  handing a review back to a coding agent such as Claude Code.
+
+- GitHub PR review: `:Review pr {n}` browses a PR with its existing review
+  threads inline, and `:Review submit` submits your comments as a review
+  through the gh CLI.
+
+Comments carry GitHub's review-comment fields (path, line, side, start_line,
+body with ```suggestion fences), so both flows share code and format.
+
+Requirements: Neovim 0.11+, git, and the gh CLI (PR review only).
+Run |:checkhealth| redline to verify.
+
+==============================================================================
+2. SETUP                                                       *redline-setup*
+
+Calling setup is optional; `:Review` works out of the box. >lua
+
+    require('redline').setup({
+        -- your overrides, see |redline-config|
+    })
+<
+With lazy.nvim: >lua
+
+    return { 'cam-matsui/redline.nvim', opts = {} }
+<
+==============================================================================
+3. COMMANDS                                                          *:Review*
+
+All functionality lives under one command with subcommands (completion via
+<Tab>):
+
+  :Review                 Review working tree vs HEAD.
+  :Review branch [ref]    Review the working tree vs merge-base(ref).
+                          Default ref: `default_base` or origin's default
+                          branch.
+  :Review pr [n | url]    Review a GitHub PR. A number (or no argument, for
+                          a picker) refers to the repo you are in; a full PR
+                          URL (https://github.com/owner/repo/pull/123) works
+                          from any directory — no clone needed.
+  :Review requests        Pick from every open PR across GitHub that requests
+                          you as a reviewer, and open it in the review tool.
+                          Works from any directory.
+  :Review comment         Comment at the cursor. With a visual range
+                          (:'<,'>Review comment), a multi-line comment.
+  :Review suggest         Suggested change from a visual range. The input is
+                          prefilled with a ```suggestion fence containing the
+                          selected lines; edit them into your proposal.
+  :Review edit            Edit the draft comment under the cursor.
+  :Review delete          Delete the draft comment under the cursor.
+  :Review reply           Reply to the PR review thread under the cursor.
+  :Review next            Jump to the next comment (crosses files).
+  :Review prev            Jump to the previous comment.
+  :Review list            Pick from all draft comments (|vim.ui.select()|).
+  :Review export [path]   Export the review as markdown. Destination: [path]
+                          if given, else `export.destination` from the config.
+                          A relative [path] resolves against the repo root and
+                          its parent directory is created. See also
+                          |redline-agent-loop|.
+  :Review submit          Submit the PR review: pick approve/request
+                          changes/comment, optionally write a summary.
+                          PR sessions only.
+  :Review refresh         Re-read the source. Comment anchors follow lines
+                          that moved; comments whose code was rewritten are
+                          marked outdated.
+  :Review overview        Open the PR overview: state, description, CI check
+                          results, commit history, and the conversation
+                          (top-level, non-inline comments). PR reviews only.
+  :Review files           Focus the file panel.
+  :Review mine            Toggle a filter showing only the files you own via
+                          the repo's CODEOWNERS (PR reviews). Needs the
+                          `read:org` gh scope to match team ownership.
+  :Review toggle-threads  Collapse or expand inline comment display.
+  :Review close           End the review and close its tab.
+
+==============================================================================
+4. MAPPINGS                                                 *redline-mappings*
+
+Default mappings are buffer-local to review buffers only, and can be changed
+or disabled via `keymaps` in |redline-config|. Every action also has a <Plug>
+mapping for manual setup:
+
+  default  <Plug> target             action ~
+  cc       <Plug>(ReviewComment)     comment (normal: line, visual: range)
+  cs       <Plug>(ReviewSuggest)     suggest change (visual)
+  ce       <Plug>(ReviewEdit)        edit comment under cursor
+  cd       <Plug>(ReviewDelete)      delete comment under cursor
+  cr       <Plug>(ReviewReply)       reply to thread under cursor (PR)
+  ]C       <Plug>(ReviewNextComment) next comment
+  [C       <Plug>(ReviewPrevComment) previous comment
+  ]f       <Plug>(ReviewNextFile)    next file
+  [f       <Plug>(ReviewPrevFile)    previous file
+  go       <Plug>(ReviewOpenFile)    open real file at cursor line
+  X        <Plug>(ReviewExport)      export review
+  S        <Plug>(ReviewSubmit)      submit PR review
+  R        <Plug>(ReviewRefresh)     refresh
+  O        <Plug>(ReviewFilterOwned) toggle "files owned by me" (PR)
+  P        <Plug>(ReviewOverview)    open the PR overview (PR)
+  q        <Plug>(ReviewClose)       close review
+           <Plug>(ReviewToggleThreads)
+
+In the file panel, <CR> opens the file under the cursor. `]c`/`[c` jump
+between diff hunks (built-in |diff-mode|).
+
+In the comment input float: <C-s> confirms from any mode, <CR> confirms from
+normal mode, `q` or <Esc><Esc> cancels. A single <Esc> only leaves insert
+mode, so a stray press never discards the comment.
+
+Editing and replying: with the cursor on a commented line (marked by the
+sign-column bar), `ce` reopens your draft for editing, `cd` deletes it, and
+`cr` replies to the GitHub thread under the cursor (PR reviews). Use
+`:Review list` to jump back to any draft.
+
+Folding: the diff buffers contain the entire file; unchanged regions are
+folded by |diff-mode|. `zo`/`zc` open/close a fold, `zR` shows the whole
+file, `zM` refolds everything. Widen the context around changes with >
+    :set diffopt+=context:12
+<
+(see 'diffopt'; the default context is 6 lines).
+
+==============================================================================
+5. CONFIGURATION                                              *redline-config*
+
+Defaults: >lua
+
+    require('redline').setup({
+        view = 'split',       -- side-by-side native diff
+        default_base = nil,   -- :Review branch base; nil = origin/HEAD
+        panel = { position = 'left', width = 35 },
+        keymaps = {
+            enabled = true,   -- false disables all default maps
+            comment = 'cc', suggest = 'cs', edit = 'ce',
+            delete = 'cd', reply = 'cr',
+            next_comment = ']C', prev_comment = '[C',
+            next_file = ']f', prev_file = '[f',
+            open_file = 'go', export = 'X', submit = 'S',
+            refresh = 'R', filter_owned = 'O',
+            overview = 'P', close = 'q',
+        },
+        export = {
+            destination = 'buffer',
+                              -- 'buffer' | 'register' | a file path.
+                              -- A relative path resolves against the
+                              -- repo root, not Neovim's cwd.
+            preamble = true,  -- prepend agent-facing instructions to
+                              -- the exported review
+        },
+        auto_refresh = false, -- on FocusGained, re-read the working
+                              -- tree so the diff and comment anchors
+                              -- track an agent's edits (see
+                              -- |redline-agent-loop|)
+        gh = { cmd = 'gh' },
+        signs = { comment = '┃' },
+    })
+<
+redline never changes your 'diffopt'; `linematch:60` is recommended for
+better diff alignment.
+
+                                                        *redline-agent-loop*
+Reviewing an agent's changes ~
+
+`:Review` (working tree vs HEAD) shows exactly what a coding agent (Claude
+Code, OpenCode) changed when it leaves work uncommitted. For a tight loop,
+export to a fixed gitignored file the agent reads back, and refresh on focus: >lua
+
+    opts = {
+      export = { destination = '.redline/review.md', preamble = true },
+      auto_refresh = true,
+    }
+<
+Then: `:Review` -> comment (`cc`) and suggest (`cs`) -> `:Review export`
+writes `.redline/review.md` -> tell the agent "apply the review in
+.redline/review.md" -> it edits, you refocus Neovim and `auto_refresh` updates
+the diff and re-anchors your drafts. Add `.redline/` to `~/.config/git/ignore`
+so review files are never committed in any repo.
+
+==============================================================================
+6. EXPORT FORMAT                                       *redline-export-format*
+
+`:Review export` produces deterministic markdown mirroring GitHub's
+review-comment fields. The format is stable; tools may rely on it. >markdown
+
+    # Code review: worktree vs HEAD — 2026-07-05
+
+    ## `lua/foo/bar.lua`
+
+    ### `lua/foo/bar.lua:42` (RIGHT)
+
+    This helper duplicates `util.trim`; reuse it.
+
+    ### `lua/foo/bar.lua:10-14` (RIGHT)
+
+    ```suggestion
+    local ok = pcall(load_config)
+    ```
+<
+- One `##` section per file in review order; one `###` heading per comment.
+- Headings are `path:line` (or `path:start-end`) plus the side: RIGHT is the
+  new code, LEFT the base (deleted) code.
+- Suggestions keep their ```suggestion fence, GitHub's format for proposed
+  replacements of exactly the referenced lines.
+- Outdated comments (code changed underneath) carry a `> outdated` marker.
+
+==============================================================================
+7. PR REVIEW                                                      *redline-pr*
+
+PR review runs entirely through the gh CLI — authentication is `gh auth
+login`; redline never sees tokens. Numbers and the picker refer to the repo
+you are in; a full PR URL reviews any repo from any directory.
+
+When run inside a clone of the PR's repo, file contents are read from local
+git at the PR's pinned commits (fetched on open, falling back to
+`refs/pull/{n}/head`); the PR branch does not need to be checked out.
+Outside a clone, contents come from the GitHub contents API — everything
+works except `go` (open the real file).
+
+Existing review threads render inline (read-only); reply with `cr`. New
+comments and suggestions are drafts, local to the session, until
+`:Review submit` posts them atomically as one review. Drafts on lines outside
+the PR's diff hunks would make GitHub reject the whole review; redline
+detects them before posting and offers to skip.
+
+==============================================================================
+8. HIGHLIGHTS                                             *redline-highlights*
+
+All groups have sensible default links; override with |nvim_set_hl()|:
+
+  RedlineTitle            panel header (Title)
+  RedlineAdd              additions (Added)
+  RedlineDelete           deletions (Removed)
+  RedlineChange           modified status (Changed)
+  RedlineComment          comment counts in the panel (DiagnosticInfo)
+  RedlinePanelMeta        panel summary line (Comment)
+  RedlinePanelDir         directory portion of a file path (Comment)
+  RedlineSign             submitted comment sign marker (DiagnosticSignInfo)
+  RedlineSignDraft        draft comment sign marker (DiagnosticSignHint)
+  RedlineCommentRange     lines covered by a comment (CursorLine)
+
+Comment cards (the boxed element shown under each commented line):
+
+  RedlineCardBorder       card border (FloatBorder)
+  RedlineCardBody         card body text (NormalFloat)
+  RedlineCardAuthor       author / "draft" label (Title)
+  RedlineCardBadge        badges like "suggestion" / "(draft)" (Special)
+  RedlineCardReply        the reply arrow on a threaded comment (Function)
+  RedlineCardMeta         line range, timestamp, fences (Comment)
+  RedlineCardSuggest      suggested lines inside a ```suggestion block (DiffAdd)
+  RedlineCardOutdated     outdated card border/badge (DiagnosticVirtualTextWarn)
+
+PR overview screen:
+
+  RedlineOvTitle          PR title (Title)
+  RedlineOvSection        section headers (Function)
+  RedlineOvMeta           metadata lines (Comment)
+  RedlineOvHash           commit SHAs (Identifier)
+  RedlineOvAuthor         author handles / state badge (Special)
+  RedlineOvPass           passing checks (DiagnosticOk)
+  RedlineOvFail           failing checks (DiagnosticError)
+  RedlineOvPending        pending checks (DiagnosticWarn)
+  RedlineOvNeutral        skipped/neutral checks (Comment)
+
+vim:tw=78:ts=8:noet:ft=help:norl:
